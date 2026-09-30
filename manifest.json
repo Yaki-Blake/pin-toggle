@@ -4,6 +4,6 @@
   "version": "0.1.0",
   "minAppVersion": "1.4.0",
   "description": "可以将软件呼唤并置顶，再次点击可将软件最小化",
-  "author": "WorkBuddy for 阿威",
+  "author": "Yaki Blake",
   "isDesktopOnly": true
 }
