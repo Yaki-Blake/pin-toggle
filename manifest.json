@@ -1,9 +1,9 @@
 {
   "id": "pin-toggle",
-  "name": "Pin Toggle (Alt+E style)",
+  "name": "Pin Toggle",
   "version": "0.1.0",
   "minAppVersion": "1.4.0",
-  "description": "全局热键一键把 Obsidian 唤出并置顶，再按一次收起。行为类似 WorkBuddy 的 Alt+E。桌面端专用。",
+  "description": "可以将软件呼唤并置顶，再次点击可将软件最小化",
   "author": "WorkBuddy for 阿威",
   "isDesktopOnly": true
 }
