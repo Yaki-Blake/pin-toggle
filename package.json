@@ -1,18 +1,24 @@
 {
   "name": "pin-toggle",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "全局热键一键把 Obsidian 唤出并置顶，再按一次收起（Alt+E 风格）。桌面端专用。",
   "main": "main.js",
   "scripts": {
     "build": "esbuild src/main.ts --bundle --external:obsidian --external:electron --format=cjs --platform=node --outfile=main.js",
-    "dev": "npm run build -- --watch"
+    "dev": "npm run build -- --watch",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src/ package.json"
   },
   "author": "阿威 (黄义威 / yiwei668)",
   "license": "MIT",
   "devDependencies": {
-    "obsidian": "^1.13.1",
+    "@eslint-community/eslint-plugin-eslint-comments": "^4.8.1",
+    "@typescript-eslint/parser": "^8.71.0",
     "esbuild": "^0.28.2",
-    "builtin-modules": "latest",
-    "@types/node": "latest"
+    "eslint": "^9.39.5",
+    "eslint-plugin-obsidianmd": "^0.4.2",
+    "obsidian": "^1.13.1",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.71.0"
   }
 }
