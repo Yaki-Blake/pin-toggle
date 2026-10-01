@@ -1,9 +1,9 @@
 {
   "id": "pin-toggle",
   "name": "Pin Toggle",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "minAppVersion": "1.13.0",
-  "description": "可以将软件呼唤并置顶，再次点击可将软件最小化。",
-  "author": "Yaki Blake",
+  "description": "可以将软件呼唤并置顶，再次点击可将软件最小化.",
+  "author": "Yaki-Blake",
   "isDesktopOnly": true
 }
