@@ -1,6 +1,6 @@
 {
   "name": "pin-toggle",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "可以将软件呼唤并置顶，再次点击可将软件最小化.",
   "main": "main.js",
   "scripts": {
