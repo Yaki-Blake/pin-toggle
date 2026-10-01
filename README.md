@@ -57,17 +57,6 @@ npm run lint        # eslint src/ package.json
 npm run build       # bundles src/main.ts into main.js
 ```
 
-## Releasing
-
-The repository root must contain `manifest.json`, `main.js`, `styles.css`, `README.md`, `LICENSE`, and `versions.json`.
-
-1. Increase `version` in `manifest.json` and add the matching entry to `versions.json`.
-2. Build, then commit.
-3. Create a GitHub release whose tag equals the `version` exactly (for example `0.1.1`, without a `v` prefix) and attach `main.js`, `manifest.json`, and `styles.css` as release assets.
-4. Publish the new version from [community.obsidian.md](https://community.obsidian.md).
-
-> `manifest.json`: `description` must be under 250 characters and end with a period; `id` must not contain "obsidian" and must be globally unique. This plugin sets `isDesktopOnly: true` because it uses Electron APIs.
-
 ---
 
 ## 中文说明
@@ -121,14 +110,3 @@ npm run typecheck
 npm run lint
 npm run build
 ```
-
-### 发布到 Obsidian 社区市场
-
-仓库根目录需含：`manifest.json`、`main.js`、`styles.css`、`README.md`、`LICENSE`、`versions.json`。
-
-1. 递增 `manifest.json` 的 `version`，并在 `versions.json` 里补上对应条目。
-2. 构建并提交。
-3. 打一个 Release：**Tag 必须与 `version` 完全一致**（如 `0.1.1`，不要加 `v` 前缀），并把 `main.js`、`manifest.json`、`styles.css` 作为二进制附件上传。
-4. 登录 [community.obsidian.md](https://community.obsidian.md) 发布新版本。
-
-> 提示：`manifest.json` 的 `description` 上限 250 字符且须以句号结尾；`id` 不能含 `obsidian` 字样且须全局唯一。本插件因使用 Electron API 而设置 `isDesktopOnly: true`。
