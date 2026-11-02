@@ -1,13 +1,14 @@
 {
   "name": "pin-toggle",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "description": "可以将软件呼唤并置顶，再次点击可将软件最小化.",
   "main": "main.js",
   "scripts": {
     "build": "esbuild src/main.ts --bundle --external:obsidian --external:electron --format=cjs --platform=node --outfile=main.js",
     "dev": "npm run build -- --watch",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint src/ package.json"
+    "lint": "eslint src/ package.json",
+    "test": "node tools/smoke-test.cjs"
   },
   "author": "Yaki-Blake",
   "license": "MIT",

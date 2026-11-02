@@ -8,14 +8,29 @@
  * 本文件不含顶层 import/export，属于全局声明文件，`declare module` 在此合法。
  */
 declare module 'electron' {
+	/** 窗口事件回调 */
+	export type ElectronWindowListener = (...args: unknown[]) => void;
+
 	/** Electron BrowserWindow 中本插件用到的成员 */
 	export interface ElectronWindow {
-		setAlwaysOnTop(flag: boolean): void;
+		/**
+		 * 设置置顶。
+		 * `level` 在 Windows 上不决定层级高低，只决定窗口是否被压到任务栏之后：
+		 * 传 `floating`（默认值）会命中 Electron 的 behind_task_bar_ 分支，
+		 * 传 `screen-saver` 则不会。
+		 */
+		setAlwaysOnTop(flag: boolean, level?: string): void;
+		isAlwaysOnTop(): boolean;
+		isVisible(): boolean;
+		isMinimized(): boolean;
+		isDestroyed(): boolean;
 		show(): void;
 		hide(): void;
 		minimize(): void;
 		focus(): void;
 		moveTop(): void;
+		on(event: string, listener: ElectronWindowListener): void;
+		off(event: string, listener: ElectronWindowListener): void;
 	}
 
 	/** Electron globalShortcut 模块中本插件用到的成员 */
