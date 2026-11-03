@@ -8,7 +8,7 @@ Desktop only (Windows / macOS / Linux).
 
 - System-wide global hotkey that fires even when the window is unfocused.
 - Three-state toggle driven by the real window state, not by an internal flag: invisible → summon, visible-but-not-on-top → re-pin, visible-and-on-top → collapse.
-- **Topmost keeper**: re-asserts the window's z-order on focus/blur/show/restore and every 1.5 s, so it survives being pushed behind another window — including a fullscreen browser.
+- **Topmost keeper**: re-asserts the window's z-order on focus/blur/show/restore and every 1.5 s, so it survives being pushed behind another window — including a fullscreen browser. The keeper only acts while the window is *unfocused*: re-raising an active window can only cover popups that legitimately belong above it (IME candidate list, tooltips, menus).
 - Uses the `screen-saver` z-order level, which avoids Electron's Windows-only "place the window behind the taskbar" path.
 - Desktop only — the plugin controls the native window, so mobile is not supported.
 
@@ -55,12 +55,20 @@ Two details decide whether "always on top" survives contact with other applicati
 
 **2. A single `setAlwaysOnTop` call is not enough.** Fullscreen windows (browser `F11`, video fullscreen, PDF/PPT presentation) are raised above topmost windows by the OS. The only compensation is to re-assert the z-order periodically, which the keeper does — with `moveTop()` only, never `focus()`, so the focus stays wherever the user put it.
 
+**3. Re-assertion must be conditional.** `moveTop()` resolves to `SetWindowPos(hwnd, HWND_TOP, ...)`. For a window that is already topmost, that means "move to the very front of the topmost band" — which also puts it in front of the IME candidate window, because that is a topmost popup in the same band. An unconditional timer therefore covers the candidate list roughly every 1.5 s while you type pinyin. The keeper now skips re-assertion in two cases:
+
+- the window is the active window (`isFocused()`) — it is already above every non-topmost window, so there is nothing to recover;
+- an IME composition is in progress, or ended less than 300 ms ago (`compositionstart` / `compositionupdate` / `compositionend` on the document).
+
+Only an explicit summon bypasses both checks.
+
 ## Known limitations
 
 1. **Exclusive fullscreen cannot be covered.** Games and DirectX exclusive-fullscreen apps render outside the normal window stack; no user-mode always-on-top window can appear above them. This is a Windows/OS constraint, not a plugin bug — the Electron maintainers describe it as "by OS design" ([electron#10078](https://github.com/electron/electron/issues/10078)). Borderless fullscreen (browser `F11`, video fullscreen, PDF/PPT presentation) *can* be covered.
 2. **Covering a fullscreen window requires re-assertion.** A very short interval is more reliable but costs more CPU; 1.5 s is the default. Turn the keeper off if you prefer the old "pin once" behaviour.
 3. **The keeper never calls `focus()`.** Stealing focus would prevent you from typing into the fullscreen page underneath. It only calls `moveTop()`, which changes the z-order without changing activation.
-4. **macOS fullscreen spaces** additionally need `setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })`, which has no effect on Windows.
+4. **A pinned window still covers other apps' popups.** The keeper is silent while Obsidian is focused, but if Obsidian is pinned on top and you type into a *different* application, the 1.5 s re-assertion can still land on that application's IME candidate window. This is inherent to always-on-top; turn the keeper off if it gets in the way.
+5. **macOS fullscreen spaces** additionally need `setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })`, which has no effect on Windows.
 
 ## Troubleshooting
 

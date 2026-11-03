@@ -2,7 +2,7 @@
  * main.js 冒烟测试（不依赖 Obsidian 运行环境）
  *
  * 用桩件替换 obsidian / electron，加载真实的 main.js 产物，
- * 验证三态切换、置顶守护与卸载清理的行为是否符合预期。
+ * 验证三态切换、置顶守护的门控条件与卸载清理的行为是否符合预期。
  *
  * 运行：node tools/smoke-test.cjs
  */
@@ -17,6 +17,8 @@ class FakeWindow {
 		this.visible = true;
 		this.minimized = false;
 		this.alwaysOnTop = false;
+		// 真实环境里 Obsidian 启动时就是活动窗口
+		this.focused = true;
 		this.destroyed = false;
 		this.calls = [];
 		this.handlers = new Map();
@@ -38,6 +40,9 @@ class FakeWindow {
 	isAlwaysOnTop() {
 		return this.alwaysOnTop;
 	}
+	isFocused() {
+		return this.focused;
+	}
 	setAlwaysOnTop(flag, level) {
 		this.alwaysOnTop = flag;
 		this.record("setAlwaysOnTop", flag, level);
@@ -49,13 +54,16 @@ class FakeWindow {
 	}
 	hide() {
 		this.visible = false;
+		this.focused = false;
 		this.record("hide");
 	}
 	minimize() {
 		this.minimized = true;
+		this.focused = false;
 		this.record("minimize");
 	}
 	focus() {
+		this.focused = true;
 		this.record("focus");
 	}
 	moveTop() {
@@ -82,9 +90,17 @@ class FakeWindow {
 const fakeWin = new FakeWindow();
 const notices = [];
 
+/**
+ * window.setInterval 用桩件接住，不真的排定定时器：
+ * 否则 1.5s 的守护轮询会在测试中途随机触发，断言计数变得不可复现。
+ * 测试通过 guardTick() 显式触发一次「守护轮询」。
+ */
+const intervals = [];
+
 class Plugin {
 	constructor() {
 		this.app = { hotkeyManager: { getHotkeys: () => [] } };
+		this.domHandlers = new Map();
 	}
 	async loadData() {
 		return null;
@@ -96,6 +112,9 @@ class Plugin {
 	}
 	addRibbonIcon() {}
 	registerInterval() {}
+	registerDomEvent(_el, type, callback) {
+		this.domHandlers.set(type, callback);
+	}
 }
 
 class PluginSettingTab {
@@ -132,8 +151,20 @@ Module._load = function (request, parent, isMain) {
 // main.js 里用了 window.setTimeout / window.setInterval
 global.window = {
 	setTimeout: (fn, ms) => setTimeout(fn, ms),
-	setInterval: (fn, ms) => setInterval(fn, ms),
-	clearInterval: (id) => clearInterval(id),
+	setInterval: (fn, ms) => {
+		intervals.push({ fn, ms });
+		return intervals.length;
+	},
+	clearInterval: () => {},
+};
+// 组合态事件注册在 document 上
+global.document = {};
+
+/** 触发一次守护轮询（对应 GUARD_INTERVAL_MS 那个定时器） */
+const guardTick = () => {
+	const guard = intervals.find((entry) => entry.ms === 1500);
+	if (!guard) throw new Error("未找到守护轮询定时器");
+	guard.fn();
 };
 
 /* ---------------- 断言 ---------------- */
@@ -152,13 +183,14 @@ function check(name, condition, detail) {
 }
 
 const tick = () => new Promise((r) => setTimeout(r, 20));
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /**
  * 插件有 250ms 的连击去重窗口（防止 Obsidian 内部热键与全局热键对同一次
  * 按键各触发一次），测试必须跨越该窗口，否则第二次调用会被静默丢弃。
  */
 const press = async (fn) => {
-	await new Promise((r) => setTimeout(r, 300));
+	await sleep(300);
 	fn();
 	await tick();
 };
@@ -179,7 +211,7 @@ const press = async (fn) => {
 		JSON.stringify(fakeWin.last("setAlwaysOnTop")) === JSON.stringify(["setAlwaysOnTop", true, "screen-saver"]),
 		JSON.stringify(fakeWin.last("setAlwaysOnTop"))
 	);
-	check("调用了 moveTop()", fakeWin.count("moveTop") >= 1);
+	check("唤出时强制提 z 序（聚焦也照提）", fakeWin.count("moveTop") >= 1, JSON.stringify(fakeWin.calls));
 	check("窗口已置顶", fakeWin.isAlwaysOnTop());
 
 	console.log("\n[2] 再次按键：应收起（默认 hide）");
@@ -202,23 +234,55 @@ const press = async (fn) => {
 	check("没有执行 hide()", fakeWin.count("hide") === 0, JSON.stringify(fakeWin.calls));
 	check("重新置顶成功", fakeWin.isAlwaysOnTop() === true);
 
-	console.log("\n[5] 置顶守护：blur 后应抢回 z 序");
+	console.log("\n[5] 守护：窗口失焦后应抢回 z 序");
 	fakeWin.clear();
 	const blur = fakeWin.handlers.get("blur");
 	check("已注册 blur 处理器", typeof blur === "function");
+	fakeWin.focused = false;
 	if (blur) blur();
 	await tick();
 	check("blur 后调用了 moveTop()", fakeWin.count("moveTop") >= 1, JSON.stringify(fakeWin.calls));
 	check("blur 后未抢焦点（无 focus 调用）", fakeWin.count("focus") === 0);
 
-	console.log("\n[6] 守护在收起态应保持静默");
-	await press(() => plugin.toggleWindow()); // 收起
+	console.log("\n[6] 回归：窗口聚焦时守护必须静默（修复抢输入法候选框）");
+	fakeWin.focused = true;
 	fakeWin.clear();
-	if (fakeWin.handlers.get("blur")) fakeWin.handlers.get("blur")();
+	if (fakeWin.handlers.get("focus")) fakeWin.handlers.get("focus")();
 	await tick();
-	check("不可见时不调用 moveTop()", fakeWin.count("moveTop") === 0, JSON.stringify(fakeWin.calls));
+	guardTick();
+	check("聚焦态下 moveTop() 一次都不调用", fakeWin.count("moveTop") === 0, JSON.stringify(fakeWin.calls));
 
-	console.log("\n[7] 设置页定义");
+	console.log("\n[7] 回归：输入法组合期间与上屏后的静默尾巴");
+	fakeWin.focused = false; // 排除焦点门控，单独验证组合态守卫
+	fakeWin.clear();
+	const composeStart = plugin.domHandlers.get("compositionstart");
+	const composeUpdate = plugin.domHandlers.get("compositionupdate");
+	const composeEnd = plugin.domHandlers.get("compositionend");
+	check(
+		"已注册组合态监听",
+		typeof composeStart === "function" && typeof composeUpdate === "function" && typeof composeEnd === "function"
+	);
+	composeStart();
+	composeUpdate();
+	guardTick();
+	check("组合输入中不重提", fakeWin.count("moveTop") === 0, JSON.stringify(fakeWin.calls));
+	composeEnd();
+	guardTick();
+	check("上屏后 300ms 内仍不重提", fakeWin.count("moveTop") === 0, JSON.stringify(fakeWin.calls));
+	await sleep(350);
+	guardTick();
+	check("静默尾巴结束后恢复重提", fakeWin.count("moveTop") === 1, JSON.stringify(fakeWin.calls));
+
+	console.log("\n[8] 用户主动唤出不受门控影响（force 分支）");
+	await press(() => plugin.toggleWindow()); // 收起
+	check("已收起", fakeWin.isVisible() === false);
+	fakeWin.clear();
+	composeStart(); // 即使处于组合态
+	await press(() => plugin.toggleWindow());
+	check("唤出时仍强制提 z 序", fakeWin.count("moveTop") >= 1, JSON.stringify(fakeWin.calls));
+	check("窗口已置顶", fakeWin.isAlwaysOnTop() === true);
+
+	console.log("\n[9] 设置页定义");
 	const defs = plugin.tab.getSettingDefinitions();
 	const toggles = defs.flatMap((g) => g.items || []).filter((i) => i.control && i.control.type === "toggle");
 	check("包含 3 个开关", toggles.length === 3, JSON.stringify(toggles.map((t) => t.control.key)));
@@ -227,7 +291,7 @@ const press = async (fn) => {
 		toggles.some((t) => t.control.key === "keepOnTop")
 	);
 
-	console.log("\n[8] 卸载清理");
+	console.log("\n[10] 卸载清理");
 	fakeWin.clear();
 	plugin.onunload();
 	check("卸载时取消置顶", fakeWin.isAlwaysOnTop() === false, JSON.stringify(fakeWin.calls));

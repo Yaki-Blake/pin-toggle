@@ -52,6 +52,8 @@ function hotkeyToAccelerator(hotkey) {
 var DEFAULT_ACCELERATOR = "Ctrl+Alt+Space";
 var PIN_LEVEL = "screen-saver";
 var GUARD_INTERVAL_MS = 1500;
+var COMPOSE_TAIL_MS = 300;
+var COMPOSE_STALE_MS = 1e4;
 var TOGGLE_GUARD_MS = 250;
 var HOTKEY_SYNC_MS = 5e3;
 var DEFAULT_SETTINGS = {
@@ -68,6 +70,10 @@ var PinTogglePlugin = class extends import_obsidian.Plugin {
     this.warnedAccelerator = "";
     this.lastToggleTs = 0;
     this.keeperHandlers = {};
+    /** 输入法是否处于组合输入中（拼音候选框正在显示） */
+    this.composing = false;
+    /** 最近一次组合事件的时间戳，用于计算静默尾巴与兜底复位 */
+    this.lastComposeTs = 0;
   }
   async onload() {
     await this.loadSettings();
@@ -125,7 +131,7 @@ var PinTogglePlugin = class extends import_obsidian.Plugin {
     }
     if (!win.isVisible()) win.show();
     win.focus();
-    window.setTimeout(() => this.reassertTop(), 0);
+    window.setTimeout(() => this.reassertTop(true), 0);
   }
   collapse() {
     const win = this.win;
@@ -148,16 +154,45 @@ var PinTogglePlugin = class extends import_obsidian.Plugin {
     }
   }
   /**
+   * 输入法是否正在组合输入（含上屏后的静默尾巴）。
+   *
+   * 拼音候选框本身也是一个 topmost 弹窗，与置顶后的编辑器同处最顶层窗口带。
+   * 此时调用 moveTop() 会把编辑器抬到候选框之上，选词结果被盖住 ——
+   * 这正是「输入拼音不到 2 秒就被置顶挡住」的成因。
+   */
+  isComposing() {
+    if (!this.composing) {
+      return Date.now() - this.lastComposeTs < COMPOSE_TAIL_MS;
+    }
+    if (Date.now() - this.lastComposeTs > COMPOSE_STALE_MS) {
+      this.composing = false;
+      return false;
+    }
+    return true;
+  }
+  /**
    * 重新断言置顶。
+   *
    * 只用 moveTop()，绝不用 focus()——focus() 会抢走当前应用（例如全屏浏览器）
    * 的焦点，用户就没法继续在页面上打字或操作。moveTop() 只调整 z 序，
    * 不改变激活状态，是唯一安全的选择。
+   *
+   * 守护的职责是「被别的程序压下去时抢回来」，因此只有在窗口**不是活动窗口**
+   * 时才需要动作。若窗口已经获得焦点，它本来就高于所有非 topmost 窗口，
+   * 此时唯一还能压在它上面的，是本该压在它上面的浮层（输入法候选框、
+   * 提示气泡、菜单）——再提一次只会把这些浮层盖掉，没有任何收益。
+   *
+   * @param force 用户主动唤出时传 true，绕过门控
    */
-  reassertTop() {
+  reassertTop(force = false) {
     const win = this.win;
     if (!win || win.isDestroyed()) return;
     if (!this.settings.alwaysOnTop || !this.settings.keepOnTop) return;
     if (!win.isVisible() || win.isMinimized()) return;
+    if (!force) {
+      if (win.isFocused()) return;
+      if (this.isComposing()) return;
+    }
     if (!win.isAlwaysOnTop()) win.setAlwaysOnTop(true, PIN_LEVEL);
     win.moveTop();
   }
@@ -171,6 +206,17 @@ var PinTogglePlugin = class extends import_obsidian.Plugin {
     for (const [event, handler] of Object.entries(this.keeperHandlers)) {
       win.on(event, handler);
     }
+    this.registerDomEvent(document, "compositionstart", () => {
+      this.composing = true;
+      this.lastComposeTs = Date.now();
+    });
+    this.registerDomEvent(document, "compositionupdate", () => {
+      this.lastComposeTs = Date.now();
+    });
+    this.registerDomEvent(document, "compositionend", () => {
+      this.composing = false;
+      this.lastComposeTs = Date.now();
+    });
     this.registerInterval(
       window.setInterval(() => {
         if (this.realState === "pinned") this.reassertTop();

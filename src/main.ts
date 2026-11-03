@@ -56,6 +56,20 @@ const PIN_LEVEL = 'screen-saver';
  */
 const GUARD_INTERVAL_MS = 1500;
 
+/**
+ * 输入法上屏后的静默尾巴（毫秒）。
+ * 拼音选完词（compositionend）后的一小段时间内仍不重提 z 序，
+ * 避免候选框刚收起、窗口就被抬到其它浮层之上。
+ */
+const COMPOSE_TAIL_MS = 300;
+
+/**
+ * 组合态的兜底过期时间（毫秒）。
+ * compositionend 在极端情况下可能不送达（输入法进程崩溃、窗口被强杀），
+ * 若只靠布尔标志，守卫会永久失效。超过这个时长没有任何组合事件就自动复位。
+ */
+const COMPOSE_STALE_MS = 10000;
+
 /** 同一次按键可能被标准快捷键与全局热键各触发一次，用时间窗去重 */
 const TOGGLE_GUARD_MS = 250;
 
@@ -88,6 +102,10 @@ export default class PinTogglePlugin extends Plugin {
 	private warnedAccelerator = '';
 	private lastToggleTs = 0;
 	private keeperHandlers: Record<string, ElectronWindowListener> = {};
+	/** 输入法是否处于组合输入中（拼音候选框正在显示） */
+	private composing = false;
+	/** 最近一次组合事件的时间戳，用于计算静默尾巴与兜底复位 */
+	private lastComposeTs = 0;
 
 	async onload() {
 		await this.loadSettings();
@@ -166,8 +184,9 @@ export default class PinTogglePlugin extends Plugin {
 		win.focus();
 		// focus() 会触发 Electron 内部的 OnWidgetActivationChanged ->
 		// MoveBehindTaskBarIfNeeded()，在同一个 tick 内提 z 序会被它覆盖，
-		// 必须等激活落地后再提一次。
-		window.setTimeout(() => this.reassertTop(), 0);
+		// 必须等激活落地后再提一次。这里是「用户主动唤出」，属于明确意图，
+		// 因此绕过守护的焦点门控（force=true）。
+		window.setTimeout(() => this.reassertTop(true), 0);
 	}
 
 	private collapse() {
@@ -195,16 +214,48 @@ export default class PinTogglePlugin extends Plugin {
 	}
 
 	/**
+	 * 输入法是否正在组合输入（含上屏后的静默尾巴）。
+	 *
+	 * 拼音候选框本身也是一个 topmost 弹窗，与置顶后的编辑器同处最顶层窗口带。
+	 * 此时调用 moveTop() 会把编辑器抬到候选框之上，选词结果被盖住 ——
+	 * 这正是「输入拼音不到 2 秒就被置顶挡住」的成因。
+	 */
+	private isComposing(): boolean {
+		if (!this.composing) {
+			return Date.now() - this.lastComposeTs < COMPOSE_TAIL_MS;
+		}
+		// 兜底：compositionend 丢失时不能永久禁用守护
+		if (Date.now() - this.lastComposeTs > COMPOSE_STALE_MS) {
+			this.composing = false;
+			return false;
+		}
+		return true;
+	}
+
+	/**
 	 * 重新断言置顶。
+	 *
 	 * 只用 moveTop()，绝不用 focus()——focus() 会抢走当前应用（例如全屏浏览器）
 	 * 的焦点，用户就没法继续在页面上打字或操作。moveTop() 只调整 z 序，
 	 * 不改变激活状态，是唯一安全的选择。
+	 *
+	 * 守护的职责是「被别的程序压下去时抢回来」，因此只有在窗口**不是活动窗口**
+	 * 时才需要动作。若窗口已经获得焦点，它本来就高于所有非 topmost 窗口，
+	 * 此时唯一还能压在它上面的，是本该压在它上面的浮层（输入法候选框、
+	 * 提示气泡、菜单）——再提一次只会把这些浮层盖掉，没有任何收益。
+	 *
+	 * @param force 用户主动唤出时传 true，绕过门控
 	 */
-	private reassertTop() {
+	private reassertTop(force = false) {
 		const win = this.win;
 		if (!win || win.isDestroyed()) return;
 		if (!this.settings.alwaysOnTop || !this.settings.keepOnTop) return;
 		if (!win.isVisible() || win.isMinimized()) return;
+
+		if (!force) {
+			if (win.isFocused()) return;
+			if (this.isComposing()) return;
+		}
 
 		if (!win.isAlwaysOnTop()) win.setAlwaysOnTop(true, PIN_LEVEL);
 		win.moveTop();
@@ -217,11 +268,25 @@ export default class PinTogglePlugin extends Plugin {
 		const kick: ElectronWindowListener = () => {
 			window.setTimeout(() => this.reassertTop(), 0);
 		};
-		// 激活 / 显示 / 还原都会触发系统 z 序重排；blur 用于被别的窗口压下去时抢回来
+		// 激活 / 显示 / 还原都会触发系统 z 序重排；blur 用于被别的窗口压下去时抢回来。
+		// 注意：这些钩子都要经过 reassertTop() 的门控，聚焦态下不会真的提 z 序。
 		this.keeperHandlers = { focus: kick, show: kick, restore: kick, blur: kick };
 		for (const [event, handler] of Object.entries(this.keeperHandlers)) {
 			win.on(event, handler);
 		}
+
+		// 输入法组合态：候选框显示期间禁止重提，否则会把选词框盖住
+		this.registerDomEvent(document, 'compositionstart', () => {
+			this.composing = true;
+			this.lastComposeTs = Date.now();
+		});
+		this.registerDomEvent(document, 'compositionupdate', () => {
+			this.lastComposeTs = Date.now();
+		});
+		this.registerDomEvent(document, 'compositionend', () => {
+			this.composing = false;
+			this.lastComposeTs = Date.now();
+		});
 
 		this.registerInterval(
 			window.setInterval(() => {

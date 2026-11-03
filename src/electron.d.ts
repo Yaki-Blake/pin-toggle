@@ -24,6 +24,8 @@ declare module 'electron' {
 		isVisible(): boolean;
 		isMinimized(): boolean;
 		isDestroyed(): boolean;
+		/** 窗口是否为当前活动窗口（系统焦点所在） */
+		isFocused(): boolean;
 		show(): void;
 		hide(): void;
 		minimize(): void;
