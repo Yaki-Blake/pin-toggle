@@ -13,6 +13,8 @@ declare module 'electron' {
 
 	/** Electron BrowserWindow 中本插件用到的成员 */
 	export interface ElectronWindow {
+		/** 窗口唯一 id，用于区分主窗口与同进程的其他窗口 */
+		id: number;
 		/**
 		 * 设置置顶。
 		 * `level` 在 Windows 上不决定层级高低，只决定窗口是否被压到任务栏之后：
@@ -29,6 +31,8 @@ declare module 'electron' {
 		show(): void;
 		hide(): void;
 		minimize(): void;
+		/** 从最小化状态还原；show() 对最小化窗口无效 */
+		restore(): void;
 		focus(): void;
 		moveTop(): void;
 		on(event: string, listener: ElectronWindowListener): void;
@@ -45,6 +49,10 @@ declare module 'electron' {
 	export interface ElectronRemote {
 		getCurrentWindow(): ElectronWindow;
 		globalShortcut: ElectronGlobalShortcut;
+		/** 枚举同进程内所有 BrowserWindow，用于识别 Obsidian 自己弹出的窗口 */
+		BrowserWindow: {
+			getAllWindows(): ElectronWindow[];
+		};
 	}
 
 	export const remote: ElectronRemote;

@@ -12,8 +12,11 @@ const Module = require("module");
 
 /* ---------------- 桩件 ---------------- */
 
+const zOrder = [];
+
 class FakeWindow {
-	constructor() {
+	constructor(id = 1) {
+		this.id = id;
 		this.visible = true;
 		this.minimized = false;
 		this.alwaysOnTop = false;
@@ -68,6 +71,23 @@ class FakeWindow {
 	}
 	moveTop() {
 		this.record("moveTop");
+		zOrder.push(this.id);
+	}
+	restore() {
+		this.visible = true;
+		this.minimized = false;
+		this.record("restore");
+	}
+	emit(event) {
+		const handler = this.handlers.get(event);
+		if (handler) handler();
+	}
+	/** 模拟用户点右上角最小化：窗口状态改变 + Electron minimize 事件 */
+	userMinimize() {
+		this.minimized = true;
+		this.visible = false;
+		this.focused = false;
+		this.emit("minimize");
 	}
 	on(event, handler) {
 		this.handlers.set(event, handler);
@@ -87,7 +107,8 @@ class FakeWindow {
 	}
 }
 
-const fakeWin = new FakeWindow();
+const fakeWin = new FakeWindow(1);
+const allWindows = [fakeWin];
 const notices = [];
 
 /**
@@ -134,6 +155,9 @@ const obsidianStub = { Plugin, PluginSettingTab, Notice };
 const electronStub = {
 	remote: {
 		getCurrentWindow: () => fakeWin,
+		BrowserWindow: {
+			getAllWindows: () => allWindows,
+		},
 		globalShortcut: {
 			register: () => true,
 			unregister: () => {},
@@ -285,17 +309,52 @@ const press = async (fn) => {
 	console.log("\n[9] 设置页定义");
 	const defs = plugin.tab.getSettingDefinitions();
 	const toggles = defs.flatMap((g) => g.items || []).filter((i) => i.control && i.control.type === "toggle");
-	check("包含 3 个开关", toggles.length === 3, JSON.stringify(toggles.map((t) => t.control.key)));
+	check("包含 4 个开关", toggles.length === 4, JSON.stringify(toggles.map((t) => t.control.key)));
 	check(
 		"含 keepOnTop 开关",
 		toggles.some((t) => t.control.key === "keepOnTop")
 	);
+	check(
+		"含 siblingsOnTop 开关",
+		toggles.some((t) => t.control.key === "siblingsOnTop")
+	);
 
-	console.log("\n[10] 卸载清理");
+	console.log("\n[10] 内部窗口优先：结构性层级（不只是第一次打开）");
+	const sibling = new FakeWindow(2);
+	allWindows.push(sibling);
+	plugin.reassertTop(true);
+	check("内部窗口被提升进 topmost 带", sibling.isAlwaysOnTop() === true);
+	check(
+		"主窗口先 moveTop、内部窗口后 moveTop",
+		JSON.stringify(zOrder.slice(-2)) === JSON.stringify([1, 2]),
+		JSON.stringify(zOrder)
+	);
+	zOrder.length = 0;
+	plugin.reassertTop(true);
+	plugin.reassertTop(true);
+	check("每轮守护都重建该顺序", JSON.stringify(zOrder) === JSON.stringify([1, 2, 1, 2]), JSON.stringify(zOrder));
+
+	console.log("\n[11] 用户手动最小化：置顶实时失效，Alt+T 直接唤起到置顶");
+	fakeWin.userMinimize();
+	check("置顶意图实时失效", plugin.pinned === false);
+	check("主窗口立即失去 topmost", fakeWin.isAlwaysOnTop() === false);
+	check("内部窗口的临时 topmost 被还原", sibling.isAlwaysOnTop() === false);
+	check("真实状态为 collapsed", plugin.realState === "collapsed");
 	fakeWin.clear();
+	guardTick();
+	check("守护不会把置顶加回来", fakeWin.count("setAlwaysOnTop") === 0 && !fakeWin.isAlwaysOnTop());
+	await press(() => plugin.toggleWindow());
+	check("窗口从最小化被 restore", fakeWin.isMinimized() === false && fakeWin.isVisible() === true);
+	check("窗口重新置顶", fakeWin.isAlwaysOnTop() === true);
+	check("真实状态回到 pinned", plugin.realState === "pinned");
+
+	console.log("\n[12] 卸载清理");
+	fakeWin.clear();
+	sibling.clear();
 	plugin.onunload();
 	check("卸载时取消置顶", fakeWin.isAlwaysOnTop() === false, JSON.stringify(fakeWin.calls));
 	check("卸载时移除 blur 监听", !fakeWin.handlers.has("blur"));
+	check("卸载时还原内部窗口", sibling.isAlwaysOnTop() === false);
 
 	console.log(`\n结果：${passed} 通过 / ${failed} 失败`);
 	process.exit(failed === 0 ? 0 : 1);

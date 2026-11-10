@@ -9,6 +9,8 @@ Desktop only (Windows / macOS / Linux).
 - System-wide global hotkey that fires even when the window is unfocused.
 - Three-state toggle driven by the real window state, not by an internal flag: invisible → summon, visible-but-not-on-top → re-pin, visible-and-on-top → collapse.
 - **Topmost keeper**: re-asserts the window's z-order on focus/blur/show/restore and every 1.5 s, so it survives being pushed behind another window — including a fullscreen browser. The keeper only acts while the window is *unfocused*: re-raising an active window can only cover popups that legitimately belong above it (IME candidate list, tooltips, menus).
+- **Internal windows above the main window**: Obsidian's own separate windows (Settings, "open in new window", dialogs) are kept above the main window *structurally*, not just the first time they are opened. Windows only has two z-order bands, so both are promoted into the topmost band and re-ordered on every keeper tick: main window first, internal windows last.
+- **Live pin state**: pinning follows the actual window. If you minimize Obsidian with the title-bar button, it immediately loses its topmost state and the keeper will not silently re-pin it; the next hotkey press summons and pins it again (with an explicit `restore()`).
 - Uses the `screen-saver` z-order level, which avoids Electron's Windows-only "place the window behind the taskbar" path.
 - Desktop only — the plugin controls the native window, so mobile is not supported.
 
@@ -42,6 +44,7 @@ Hotkeys are bound in Obsidian's own hotkey UI — not inside the plugin settings
 | 置顶 (always on top) | Whether the summoned window really floats above other applications. Turn it off to merely bring it to the front. | On |
 | 置顶守护 (topmost keeper) | Keep re-asserting the z-order so the window cannot be pushed behind other windows. Turn it off to save power, at the cost of only pinning at summon time. | On |
 | 收起方式 | Collapse behavior: hide the window (no taskbar entry, like `Alt+E`) or minimize it to the taskbar. | Hide |
+| 内部窗口优先 | Keep Obsidian's own separate windows (Settings, popout notes, dialogs) above the main window; the main window only covers other applications. Turn it off to put the main window back on top. | On |
 
 ## Usage
 
@@ -107,6 +110,8 @@ npm test            # state-machine smoke test against the built main.js
 - 系统级全局热键（窗口无焦点时也能触发）。
 - 三态切换，依据**窗口真实状态**而非插件内部标志：看不见 → 唤出；看得见但没置顶 → 重新置顶；看得见且已置顶 → 收起。
 - **置顶守护**：在 focus/blur/show/restore 以及每 1.5 秒重新断言一次 z 序，被其他窗口（含全屏浏览器）压下去后能自动抢回上层。
+- **内部窗口优先**：Obsidian 自己另起的窗口（设置页、新窗口笔记、对话框等）始终排在主窗口之上，不是只在刚打开那一刻有效。Windows 只有两个 z 序带，守护每轮按「主窗口 → 内部窗口」固定顺序重建层级。
+- **置顶状态实时化**：手动点右上角最小化后窗口立即失去置顶，守护不会偷偷加回来；再按一次热键会直接还复并置顶。
 - 使用 `screen-saver` 置顶层级，绕开 Electron 在 Windows 上「把窗口压到任务栏之后」的路径。
 - 桌面端专用（Windows / macOS / Linux）。
 

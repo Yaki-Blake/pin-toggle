@@ -59,7 +59,8 @@ var HOTKEY_SYNC_MS = 5e3;
 var DEFAULT_SETTINGS = {
   alwaysOnTop: true,
   hideInsteadOfMinimize: true,
-  keepOnTop: true
+  keepOnTop: true,
+  siblingsOnTop: true
 };
 var PinTogglePlugin = class extends import_obsidian.Plugin {
   constructor() {
@@ -70,6 +71,10 @@ var PinTogglePlugin = class extends import_obsidian.Plugin {
     this.warnedAccelerator = "";
     this.lastToggleTs = 0;
     this.keeperHandlers = {};
+    /** 插件是否主动置顶过；用户手动改变窗口状态后置 false，守护不再把置顶加回来 */
+    this.pinned = false;
+    /** 被插件临时提升为置顶的同应用内部窗口 id，收起/卸载时统一还原 */
+    this.pinnedSiblings = /* @__PURE__ */ new Set();
     /** 输入法是否处于组合输入中（拼音候选框正在显示） */
     this.composing = false;
     /** 最近一次组合事件的时间戳，用于计算静默尾巴与兜底复位 */
@@ -126,9 +131,11 @@ var PinTogglePlugin = class extends import_obsidian.Plugin {
   summon() {
     const win = this.win;
     if (!win || win.isDestroyed()) return;
+    this.pinned = true;
     if (this.settings.alwaysOnTop) {
       win.setAlwaysOnTop(true, PIN_LEVEL);
     }
+    if (win.isMinimized()) win.restore();
     if (!win.isVisible()) win.show();
     win.focus();
     window.setTimeout(() => this.reassertTop(true), 0);
@@ -136,7 +143,9 @@ var PinTogglePlugin = class extends import_obsidian.Plugin {
   collapse() {
     const win = this.win;
     if (!win || win.isDestroyed()) return;
+    this.pinned = false;
     win.setAlwaysOnTop(false);
+    this.unpinSiblingWindows();
     if (this.settings.hideInsteadOfMinimize) {
       win.hide();
     } else {
@@ -146,6 +155,8 @@ var PinTogglePlugin = class extends import_obsidian.Plugin {
   /** 立即取消窗口置顶（关闭「置顶」设置项时调用） */
   releaseTop() {
     const win = this.win;
+    this.pinned = false;
+    this.unpinSiblingWindows();
     if (!win || win.isDestroyed()) return;
     try {
       win.setAlwaysOnTop(false);
@@ -171,6 +182,81 @@ var PinTogglePlugin = class extends import_obsidian.Plugin {
     return true;
   }
   /**
+   * 同进程内、除主窗口之外的可见窗口。
+   *
+   * Obsidian 的「设置」「在新窗口中打开」「对话框」等都是独立 BrowserWindow，
+   * 默认处于普通窗口带，会被置顶的主窗口压在下面 —— 这就是需要分层的原因。
+   */
+  getSiblingWindows() {
+    const win = this.win;
+    if (!win || win.isDestroyed()) return [];
+    try {
+      return import_electron.remote.BrowserWindow.getAllWindows().filter(
+        (w) => w && w.id !== win.id && !w.isDestroyed() && w.isVisible() && !w.isMinimized()
+      );
+    } catch (error) {
+      console.error("[Pin Toggle] \u679A\u4E3E\u5E94\u7528\u7A97\u53E3\u5931\u8D25\uFF1A", error);
+      return [];
+    }
+  }
+  /**
+   * 建立「主窗口 < 内部窗口」的稳定层级。
+   *
+   * Windows 的 z-order 只有 topmost / 非 topmost 两个带，无法给主窗口和内部窗口
+   * 各分配一个不同的层级带。可靠做法是：先让两者都进入 topmost 带（这样外部
+   * 程序都压不住），再固定按「主窗口 moveTop → 内部窗口 moveTop」的顺序排序，
+   * 后调用者永远排在更前面。守护每一轮都重建这个顺序，所以不是「第一次打开
+   * 才有效」，而是持续生效的结构性优先级。
+   */
+  raiseSiblingWindows(windows) {
+    if (!this.settings.siblingsOnTop) return;
+    const list = windows ?? this.getSiblingWindows();
+    for (const w of list) {
+      try {
+        if (!w.isAlwaysOnTop()) {
+          w.setAlwaysOnTop(true, PIN_LEVEL);
+          this.pinnedSiblings.add(w.id);
+        }
+        w.moveTop();
+      } catch (error) {
+        console.error("[Pin Toggle] \u63D0\u5347\u5185\u90E8\u7A97\u53E3\u5C42\u7EA7\u5931\u8D25\uFF1A", error);
+      }
+    }
+  }
+  /** 撤销对内部窗口的层级改动，避免收起/卸载后残留 topmost */
+  unpinSiblingWindows() {
+    if (this.pinnedSiblings.size === 0) return;
+    let all = [];
+    try {
+      all = import_electron.remote.BrowserWindow.getAllWindows();
+    } catch (error) {
+      console.error("[Pin Toggle] \u679A\u4E3E\u5E94\u7528\u7A97\u53E3\u5931\u8D25\uFF1A", error);
+      this.pinnedSiblings.clear();
+      return;
+    }
+    for (const id of this.pinnedSiblings) {
+      try {
+        const w = all.find((x) => x && x.id === id);
+        if (w && !w.isDestroyed() && w.isAlwaysOnTop()) w.setAlwaysOnTop(false);
+      } catch (error) {
+        console.error("[Pin Toggle] \u8FD8\u539F\u5185\u90E8\u7A97\u53E3\u5C42\u7EA7\u5931\u8D25\uFF1A", error);
+      }
+    }
+    this.pinnedSiblings.clear();
+  }
+  /** 用户自己点了最小化/隐藏 —— 置顶状态实时失效，守护不得再把它加回来 */
+  onWindowStateChangedByUser() {
+    if (!this.pinned) return;
+    this.pinned = false;
+    const win = this.win;
+    try {
+      if (win && !win.isDestroyed() && win.isAlwaysOnTop()) win.setAlwaysOnTop(false);
+    } catch (error) {
+      console.error("[Pin Toggle] \u53D6\u6D88\u7F6E\u9876\u5931\u8D25\uFF1A", error);
+    }
+    this.unpinSiblingWindows();
+  }
+  /**
    * 重新断言置顶。
    *
    * 只用 moveTop()，绝不用 focus()——focus() 会抢走当前应用（例如全屏浏览器）
@@ -188,13 +274,16 @@ var PinTogglePlugin = class extends import_obsidian.Plugin {
     const win = this.win;
     if (!win || win.isDestroyed()) return;
     if (!this.settings.alwaysOnTop || !this.settings.keepOnTop) return;
+    if (!this.pinned && !force) return;
     if (!win.isVisible() || win.isMinimized()) return;
+    const siblings = this.settings.siblingsOnTop ? this.getSiblingWindows() : [];
     if (!force) {
-      if (win.isFocused()) return;
+      if (win.isFocused() && siblings.length === 0) return;
       if (this.isComposing()) return;
     }
     if (!win.isAlwaysOnTop()) win.setAlwaysOnTop(true, PIN_LEVEL);
     win.moveTop();
+    this.raiseSiblingWindows(siblings);
   }
   attachKeeper() {
     const win = this.win;
@@ -202,7 +291,15 @@ var PinTogglePlugin = class extends import_obsidian.Plugin {
     const kick = () => {
       window.setTimeout(() => this.reassertTop(), 0);
     };
-    this.keeperHandlers = { focus: kick, show: kick, restore: kick, blur: kick };
+    const userChanged = () => this.onWindowStateChangedByUser();
+    this.keeperHandlers = {
+      focus: kick,
+      show: kick,
+      restore: kick,
+      blur: kick,
+      minimize: userChanged,
+      hide: userChanged
+    };
     for (const [event, handler] of Object.entries(this.keeperHandlers)) {
       win.on(event, handler);
     }
@@ -219,12 +316,14 @@ var PinTogglePlugin = class extends import_obsidian.Plugin {
     });
     this.registerInterval(
       window.setInterval(() => {
-        if (this.realState === "pinned") this.reassertTop();
+        if (this.pinned) this.reassertTop();
       }, GUARD_INTERVAL_MS)
     );
   }
   detachKeeper() {
     const win = this.win;
+    this.pinned = false;
+    this.unpinSiblingWindows();
     try {
       if (win && !win.isDestroyed()) {
         for (const [event, handler] of Object.entries(this.keeperHandlers)) {
@@ -327,6 +426,11 @@ var PinSettingTab = class extends import_obsidian.PluginSettingTab {
             name: "\u6536\u8D77\u65B9\u5F0F",
             desc: "\u6536\u8D77\u65F6\uFF1A\u9690\u85CF\u7A97\u53E3\uFF08\u4E0D\u5360\u4EFB\u52A1\u680F\uFF0C\u50CF Alt+E\uFF09\u8FD8\u662F\u6700\u5C0F\u5316\u5230\u4EFB\u52A1\u680F\u3002",
             control: { type: "toggle", key: "hideInsteadOfMinimize" }
+          },
+          {
+            name: "\u5185\u90E8\u7A97\u53E3\u4F18\u5148",
+            desc: "Obsidian \u81EA\u5DF1\u5F39\u51FA\u7684\u7A97\u53E3\uFF08\u8BBE\u7F6E\u9875\u3001\u65B0\u7A97\u53E3\u7B14\u8BB0\u3001\u5BF9\u8BDD\u6846\u7B49\uFF09\u59CB\u7EC8\u6392\u5728\u4E3B\u7A97\u53E3\u4E4B\u4E0A\uFF1B\u4E3B\u7A97\u53E3\u53EA\u8D1F\u8D23\u538B\u4F4F\u5176\u4ED6\u8F6F\u4EF6\u3002\u5173\u95ED\u5219\u4E3B\u7A97\u53E3\u56DE\u5230\u6700\u9876\u3002",
+            control: { type: "toggle", key: "siblingsOnTop" }
           }
         ]
       }
@@ -336,7 +440,7 @@ var PinSettingTab = class extends import_obsidian.PluginSettingTab {
     return this.plugin.settings[key];
   }
   async setControlValue(key, value) {
-    if (key === "alwaysOnTop" || key === "hideInsteadOfMinimize" || key === "keepOnTop") {
+    if (key === "alwaysOnTop" || key === "hideInsteadOfMinimize" || key === "keepOnTop" || key === "siblingsOnTop") {
       this.plugin.settings[key] = Boolean(value);
       await this.plugin.saveSettings();
       if (key === "alwaysOnTop" && !value) this.plugin.releaseTop();

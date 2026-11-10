@@ -83,12 +83,15 @@ interface PinSettings {
 	hideInsteadOfMinimize: boolean;
 	/** 是否持续维持置顶（被压下去后自动抢回上层） */
 	keepOnTop: boolean;
+	/** 是否让 Obsidian 自己弹出的窗口（设置页、新窗口笔记等）排在主窗口之上 */
+	siblingsOnTop: boolean;
 }
 
 const DEFAULT_SETTINGS: PinSettings = {
 	alwaysOnTop: true,
 	hideInsteadOfMinimize: true,
 	keepOnTop: true,
+	siblingsOnTop: true,
 };
 
 /** 窗口的真实状态，全部从 Electron 读取，不用插件内部的布尔值自记账 */
@@ -102,6 +105,10 @@ export default class PinTogglePlugin extends Plugin {
 	private warnedAccelerator = '';
 	private lastToggleTs = 0;
 	private keeperHandlers: Record<string, ElectronWindowListener> = {};
+	/** 插件是否主动置顶过；用户手动改变窗口状态后置 false，守护不再把置顶加回来 */
+	private pinned = false;
+	/** 被插件临时提升为置顶的同应用内部窗口 id，收起/卸载时统一还原 */
+	private pinnedSiblings = new Set<number>();
 	/** 输入法是否处于组合输入中（拼音候选框正在显示） */
 	private composing = false;
 	/** 最近一次组合事件的时间戳，用于计算静默尾巴与兜底复位 */
@@ -176,10 +183,13 @@ export default class PinTogglePlugin extends Plugin {
 		const win = this.win;
 		if (!win || win.isDestroyed()) return;
 
+		this.pinned = true;
 		// 先定层级再显示，保证窗口一出现就带正确的 z 序
 		if (this.settings.alwaysOnTop) {
 			win.setAlwaysOnTop(true, PIN_LEVEL);
 		}
+		// 用户手动点过最小化时 show() 不会把窗口从任务栏还原，必须显式 restore()
+		if (win.isMinimized()) win.restore();
 		if (!win.isVisible()) win.show();
 		win.focus();
 		// focus() 会触发 Electron 内部的 OnWidgetActivationChanged ->
@@ -193,8 +203,10 @@ export default class PinTogglePlugin extends Plugin {
 		const win = this.win;
 		if (!win || win.isDestroyed()) return;
 
+		this.pinned = false;
 		// 先摘掉 topmost，避免窗口隐藏后残留置顶状态
 		win.setAlwaysOnTop(false);
+		this.unpinSiblingWindows();
 		if (this.settings.hideInsteadOfMinimize) {
 			win.hide();
 		} else {
@@ -205,6 +217,8 @@ export default class PinTogglePlugin extends Plugin {
 	/** 立即取消窗口置顶（关闭「置顶」设置项时调用） */
 	releaseTop() {
 		const win = this.win;
+		this.pinned = false;
+		this.unpinSiblingWindows();
 		if (!win || win.isDestroyed()) return;
 		try {
 			win.setAlwaysOnTop(false);
@@ -233,6 +247,85 @@ export default class PinTogglePlugin extends Plugin {
 	}
 
 	/**
+	 * 同进程内、除主窗口之外的可见窗口。
+	 *
+	 * Obsidian 的「设置」「在新窗口中打开」「对话框」等都是独立 BrowserWindow，
+	 * 默认处于普通窗口带，会被置顶的主窗口压在下面 —— 这就是需要分层的原因。
+	 */
+	private getSiblingWindows(): ElectronWindow[] {
+		const win = this.win;
+		if (!win || win.isDestroyed()) return [];
+		try {
+			return remote.BrowserWindow.getAllWindows().filter(
+				(w) => w && w.id !== win.id && !w.isDestroyed() && w.isVisible() && !w.isMinimized(),
+			);
+		} catch (error) {
+			console.error('[Pin Toggle] 枚举应用窗口失败：', error);
+			return [];
+		}
+	}
+
+	/**
+	 * 建立「主窗口 < 内部窗口」的稳定层级。
+	 *
+	 * Windows 的 z-order 只有 topmost / 非 topmost 两个带，无法给主窗口和内部窗口
+	 * 各分配一个不同的层级带。可靠做法是：先让两者都进入 topmost 带（这样外部
+	 * 程序都压不住），再固定按「主窗口 moveTop → 内部窗口 moveTop」的顺序排序，
+	 * 后调用者永远排在更前面。守护每一轮都重建这个顺序，所以不是「第一次打开
+	 * 才有效」，而是持续生效的结构性优先级。
+	 */
+	private raiseSiblingWindows(windows?: ElectronWindow[]) {
+		if (!this.settings.siblingsOnTop) return;
+		const list = windows ?? this.getSiblingWindows();
+		for (const w of list) {
+			try {
+				if (!w.isAlwaysOnTop()) {
+					w.setAlwaysOnTop(true, PIN_LEVEL);
+					this.pinnedSiblings.add(w.id);
+				}
+				w.moveTop();
+			} catch (error) {
+				console.error('[Pin Toggle] 提升内部窗口层级失败：', error);
+			}
+		}
+	}
+
+	/** 撤销对内部窗口的层级改动，避免收起/卸载后残留 topmost */
+	private unpinSiblingWindows() {
+		if (this.pinnedSiblings.size === 0) return;
+		let all: ElectronWindow[] = [];
+		try {
+			all = remote.BrowserWindow.getAllWindows();
+		} catch (error) {
+			console.error('[Pin Toggle] 枚举应用窗口失败：', error);
+			this.pinnedSiblings.clear();
+			return;
+		}
+		for (const id of this.pinnedSiblings) {
+			try {
+				const w = all.find((x) => x && x.id === id);
+				if (w && !w.isDestroyed() && w.isAlwaysOnTop()) w.setAlwaysOnTop(false);
+			} catch (error) {
+				console.error('[Pin Toggle] 还原内部窗口层级失败：', error);
+			}
+		}
+		this.pinnedSiblings.clear();
+	}
+
+	/** 用户自己点了最小化/隐藏 —— 置顶状态实时失效，守护不得再把它加回来 */
+	private onWindowStateChangedByUser() {
+		if (!this.pinned) return;
+		this.pinned = false;
+		const win = this.win;
+		try {
+			if (win && !win.isDestroyed() && win.isAlwaysOnTop()) win.setAlwaysOnTop(false);
+		} catch (error) {
+			console.error('[Pin Toggle] 取消置顶失败：', error);
+		}
+		this.unpinSiblingWindows();
+	}
+
+	/**
 	 * 重新断言置顶。
 	 *
 	 * 只用 moveTop()，绝不用 focus()——focus() 会抢走当前应用（例如全屏浏览器）
@@ -250,15 +343,19 @@ export default class PinTogglePlugin extends Plugin {
 		const win = this.win;
 		if (!win || win.isDestroyed()) return;
 		if (!this.settings.alwaysOnTop || !this.settings.keepOnTop) return;
+		if (!this.pinned && !force) return;
 		if (!win.isVisible() || win.isMinimized()) return;
 
+		const siblings = this.settings.siblingsOnTop ? this.getSiblingWindows() : [];
 		if (!force) {
-			if (win.isFocused()) return;
+			// 有内部窗口时即使主窗口聚焦，也要重建「主窗口 < 内部窗口」的顺序
+			if (win.isFocused() && siblings.length === 0) return;
 			if (this.isComposing()) return;
 		}
 
 		if (!win.isAlwaysOnTop()) win.setAlwaysOnTop(true, PIN_LEVEL);
 		win.moveTop();
+		this.raiseSiblingWindows(siblings);
 	}
 
 	private attachKeeper() {
@@ -270,7 +367,15 @@ export default class PinTogglePlugin extends Plugin {
 		};
 		// 激活 / 显示 / 还原都会触发系统 z 序重排；blur 用于被别的窗口压下去时抢回来。
 		// 注意：这些钩子都要经过 reassertTop() 的门控，聚焦态下不会真的提 z 序。
-		this.keeperHandlers = { focus: kick, show: kick, restore: kick, blur: kick };
+		const userChanged: ElectronWindowListener = () => this.onWindowStateChangedByUser();
+		this.keeperHandlers = {
+			focus: kick,
+			show: kick,
+			restore: kick,
+			blur: kick,
+			minimize: userChanged,
+			hide: userChanged,
+		};
 		for (const [event, handler] of Object.entries(this.keeperHandlers)) {
 			win.on(event, handler);
 		}
@@ -290,13 +395,15 @@ export default class PinTogglePlugin extends Plugin {
 
 		this.registerInterval(
 			window.setInterval(() => {
-				if (this.realState === 'pinned') this.reassertTop();
+				if (this.pinned) this.reassertTop();
 			}, GUARD_INTERVAL_MS),
 		);
 	}
 
 	private detachKeeper() {
 		const win = this.win;
+		this.pinned = false;
+		this.unpinSiblingWindows();
 		try {
 			if (win && !win.isDestroyed()) {
 				for (const [event, handler] of Object.entries(this.keeperHandlers)) {
@@ -422,6 +529,13 @@ class PinSettingTab extends PluginSettingTab {
 						desc: '收起时：隐藏窗口（不占任务栏，像 Alt+E）还是最小化到任务栏。',
 						control: { type: 'toggle', key: 'hideInsteadOfMinimize' },
 					},
+					{
+						name: '内部窗口优先',
+						desc:
+							'Obsidian 自己弹出的窗口（设置页、新窗口笔记、对话框等）始终排在主窗口之上；' +
+							'主窗口只负责压住其他软件。关闭则主窗口回到最顶。',
+						control: { type: 'toggle', key: 'siblingsOnTop' },
+					},
 				],
 			},
 		];
@@ -432,7 +546,12 @@ class PinSettingTab extends PluginSettingTab {
 	}
 
 	async setControlValue(key: string, value: unknown): Promise<void> {
-		if (key === 'alwaysOnTop' || key === 'hideInsteadOfMinimize' || key === 'keepOnTop') {
+		if (
+			key === 'alwaysOnTop' ||
+			key === 'hideInsteadOfMinimize' ||
+			key === 'keepOnTop' ||
+			key === 'siblingsOnTop'
+		) {
 			this.plugin.settings[key] = Boolean(value);
 			await this.plugin.saveSettings();
 			// 关掉「置顶」时立即同步窗口状态，避免设置与窗口不一致
